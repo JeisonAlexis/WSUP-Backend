@@ -1,6 +1,8 @@
 import express from "express";
 import cors from "cors";
 
+const PORT = process.env.PORT || 3000;
+
 import authRoutes from "./routes/auth.js";
 import estudiantesRoutes from "./routes/estudiantes.js";
 
@@ -12,6 +14,6 @@ app.use(express.json());
 app.use("/auth", authRoutes);
 app.use("/estudiantes", estudiantesRoutes);
 
-app.listen(3000, () => {
-  console.log("Servidor corriendo en http://localhost:3000");
+app.listen(PORT, () => {
+  console.log("Servidor corriendo en puerto", PORT);
 });
