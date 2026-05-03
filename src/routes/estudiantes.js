@@ -4,49 +4,53 @@ import { authMiddleware } from "../middleware/authMiddleware.js";
 
 const router = express.Router();
 
-const normalizar = (str) =>
+// Normalizar texto (sin tildes)
+const normalizar = (str = "") =>
   str
     .toLowerCase()
     .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, ""); 
+    .replace(/[\u0300-\u036f]/g, "");
 
 router.get("/search", authMiddleware, async (req, res) => {
   const { q } = req.query;
 
   if (!q) return res.status(400).json({ error: "Query requerida" });
-
-  const normalizar = (str) =>
-    str
-      .toLowerCase()
-      .normalize("NFD")
-      .replace(/[\u0300-\u036f]/g, "");
-
+  
   const palabras = normalizar(q).split(" ").filter(Boolean);
 
-  const estudiantesDB = await db.execute(`
-    SELECT e.id, e.documento, e.nombre, p.id as programa_id, p.nombre as programa_nombre
-    FROM estudiantes e
-    LEFT JOIN programas p ON p.estudiante_id = e.id
-  `);
+  // TRAER TODO (incluyendo programas)
+  const estudiantesDB = await db.execute({
+    sql: `
+      SELECT 
+        e.id,
+        e.documento,
+        e.nombre,
+        e.usuario,
+        p.id as programa_id,
+        p.nombre as programa_nombre
+      FROM estudiantes e
+      LEFT JOIN programas p ON p.estudiante_id = e.id
+    `,
+  });
 
   const mapa = new Map();
 
+  // Agrupar estudiantes
   for (const row of estudiantesDB.rows) {
-    const id = row.id;
-
-    if (!mapa.has(id)) {
-      mapa.set(id, {
+    if (!mapa.has(row.id)) {
+      mapa.set(row.id, {
         estudiante: {
           id: row.id,
           documento: row.documento,
           nombre: row.nombre,
+          usuario: row.usuario, 
         },
         programas: [],
       });
     }
 
     if (row.programa_id) {
-      mapa.get(id).programas.push({
+      mapa.get(row.id).programas.push({
         id: row.programa_id,
         nombre: row.programa_nombre,
       });
@@ -58,13 +62,17 @@ router.get("/search", authMiddleware, async (req, res) => {
   for (const item of mapa.values()) {
     const nombre = normalizar(item.estudiante.nombre);
     const documento = item.estudiante.documento;
+    const usuario = normalizar(item.estudiante.usuario || "");
 
-    const programas = item.programas.map((p) => normalizar(p.nombre));
+    const programas = item.programas.map((p) =>
+      normalizar(p.nombre)
+    );
 
     const coincide = palabras.every((palabra) => {
       return (
         nombre.includes(palabra) ||
         documento.includes(palabra) ||
+        usuario.includes(palabra) ||
         programas.some((p) => p.includes(palabra))
       );
     });
@@ -74,7 +82,7 @@ router.get("/search", authMiddleware, async (req, res) => {
     }
   }
 
-  
+  // TRAER LIQUIDACIONES
   const resultadoFinal = [];
 
   for (const item of filtrados) {
@@ -102,16 +110,22 @@ router.get("/search", authMiddleware, async (req, res) => {
 });
 
 
+// Buscar por documento
 router.get("/:documento", authMiddleware, async (req, res) => {
   const { documento } = req.params;
 
   const estudiante = await db.execute({
-    sql: "SELECT * FROM estudiantes WHERE documento = ?",
+    sql: `
+      SELECT id, documento, nombre, usuario 
+      FROM estudiantes 
+      WHERE documento = ?
+    `,
     args: [documento],
   });
 
-  if (!estudiante.rows.length)
+  if (!estudiante.rows.length) {
     return res.status(404).json({ error: "No encontrado" });
+  }
 
   const est = estudiante.rows[0];
 
