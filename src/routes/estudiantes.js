@@ -4,7 +4,7 @@ import { authMiddleware } from "../middleware/authMiddleware.js";
 
 const router = express.Router();
 
-// Normalizar texto (sin tildes)
+// Normalizar texto
 const normalizar = (str = "") =>
   str
     .toLowerCase()
@@ -15,10 +15,9 @@ router.get("/search", authMiddleware, async (req, res) => {
   const { q } = req.query;
 
   if (!q) return res.status(400).json({ error: "Query requerida" });
-  
+
   const palabras = normalizar(q).split(" ").filter(Boolean);
 
-  // TRAER TODO (incluyendo programas)
   const estudiantesDB = await db.execute({
     sql: `
       SELECT 
@@ -26,8 +25,14 @@ router.get("/search", authMiddleware, async (req, res) => {
         e.documento,
         e.nombre,
         e.usuario,
+
         p.id as programa_id,
-        p.nombre as programa_nombre
+        p.nombre as programa_nombre,
+        p.estudiantePensum,
+        p.jornada,
+        p.categoria,
+        p.situacion
+
       FROM estudiantes e
       LEFT JOIN programas p ON p.estudiante_id = e.id
     `,
@@ -35,7 +40,6 @@ router.get("/search", authMiddleware, async (req, res) => {
 
   const mapa = new Map();
 
-  // Agrupar estudiantes
   for (const row of estudiantesDB.rows) {
     if (!mapa.has(row.id)) {
       mapa.set(row.id, {
@@ -43,7 +47,7 @@ router.get("/search", authMiddleware, async (req, res) => {
           id: row.id,
           documento: row.documento,
           nombre: row.nombre,
-          usuario: row.usuario, 
+          usuario: row.usuario,
         },
         programas: [],
       });
@@ -53,6 +57,10 @@ router.get("/search", authMiddleware, async (req, res) => {
       mapa.get(row.id).programas.push({
         id: row.programa_id,
         nombre: row.programa_nombre,
+        estudiantePensum: row.estudiantePensum,
+        jornada: row.jornada,
+        categoria: row.categoria,
+        situacion: row.situacion,
       });
     }
   }
@@ -77,12 +85,9 @@ router.get("/search", authMiddleware, async (req, res) => {
       );
     });
 
-    if (coincide) {
-      filtrados.push(item);
-    }
+    if (coincide) filtrados.push(item);
   }
 
-  // TRAER LIQUIDACIONES
   const resultadoFinal = [];
 
   for (const item of filtrados) {
@@ -107,51 +112,6 @@ router.get("/search", authMiddleware, async (req, res) => {
   }
 
   res.json(resultadoFinal);
-});
-
-
-// Buscar por documento
-router.get("/:documento", authMiddleware, async (req, res) => {
-  const { documento } = req.params;
-
-  const estudiante = await db.execute({
-    sql: `
-      SELECT id, documento, nombre, usuario 
-      FROM estudiantes 
-      WHERE documento = ?
-    `,
-    args: [documento],
-  });
-
-  if (!estudiante.rows.length) {
-    return res.status(404).json({ error: "No encontrado" });
-  }
-
-  const est = estudiante.rows[0];
-
-  const programas = await db.execute({
-    sql: "SELECT * FROM programas WHERE estudiante_id = ?",
-    args: [est.id],
-  });
-
-  const result = [];
-
-  for (const prog of programas.rows) {
-    const liquidaciones = await db.execute({
-      sql: "SELECT * FROM liquidaciones WHERE programa_id = ?",
-      args: [prog.id],
-    });
-
-    result.push({
-      ...prog,
-      liquidaciones: liquidaciones.rows,
-    });
-  }
-
-  res.json({
-    estudiante: est,
-    programas: result,
-  });
 });
 
 export default router;
