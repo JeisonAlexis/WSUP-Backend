@@ -1,4 +1,8 @@
 .env
+venv
+fotos_contactos
 node_modules
 scripts
 data
+teams_auth.json
+teams_scraper_v2.py
