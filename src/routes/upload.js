@@ -1,41 +1,30 @@
 import express from "express";
 import multer from "multer";
-import fs from "fs";
-import path from "path";
+import { CloudinaryStorage } from "multer-storage-cloudinary";
+import cloudinary from "cloudinary";
 
 const router = express.Router();
 
-const uploadDir = path.resolve("uploads");
+cloudinary.v2.config({
+  cloud_name: process.env.CLOUD_NAME,
+  api_key: process.env.API_KEY,
+  api_secret: process.env.API_SECRET,
+});
 
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, uploadDir);
-  },
-
-  filename: (req, file, cb) => {
-    cb(null, file.originalname);
+const storage = new CloudinaryStorage({
+  cloudinary: cloudinary.v2,
+  params: {
+    folder: "contactos",
+    allowed_formats: ["jpg", "png", "jpeg"],
   },
 });
 
 const upload = multer({ storage });
 
 router.post("/foto", upload.single("foto"), (req, res) => {
-  console.log(req.file);
-
-  if (!req.file) {
-    return res.status(400).json({
-      error: "No se subió archivo",
-    });
-  }
-
   res.json({
-    ok: true,
-    filename: req.file.filename,
-    url: `/uploads/${req.file.filename}`,
+    url: req.file.path,
+    public_id: req.file.filename,
   });
 });
 
