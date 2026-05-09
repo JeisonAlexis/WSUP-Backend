@@ -43,6 +43,7 @@ router.get(
             e.correo,
             e.telefono,
             e.foto,
+            e.sede,
 
             p.id as programa_id,
             p.nombre as programa_nombre,
@@ -70,6 +71,7 @@ router.get(
               correo: row.correo,
               telefono: row.telefono,
               foto: row.foto,
+              sede: row.sede,
             },
             programas: [],
           });
@@ -110,6 +112,10 @@ router.get(
           item.estudiante.telefono || ""
         );
 
+        const sede = normalizar(
+          item.estudiante.sede || ""
+        );
+
         const programas =
           item.programas.map((p) =>
             normalizar(p.nombre)
@@ -125,6 +131,7 @@ router.get(
               telefono.includes(
                 palabra
               ) ||
+              sede.includes(palabra) ||
               programas.some((p) =>
                 p.includes(palabra)
               )
@@ -220,7 +227,8 @@ router.get(
             usuario,
             correo,
             telefono,
-            foto
+            foto,
+            sede
           FROM estudiantes
           WHERE documento = ?
         `,
