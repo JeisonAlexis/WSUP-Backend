@@ -18,21 +18,15 @@ router.get(
   async (req, res) => {
     try {
       const { q } = req.query;
-
-      const page = parseInt(
-        req.query.page || "1"
-      );
+      const page = parseInt(req.query.page || "1");
 
       if (!q) {
-        return res.status(400).json({
-          error: "Query requerida",
-        });
+        return res.status(400).json({ error: "Query requerida" });
       }
 
-      const palabras = normalizar(q)
-        .split(" ")
-        .filter(Boolean);
+      const palabras = normalizar(q).split(" ").filter(Boolean);
 
+      // Incluir todos los nuevos campos en la consulta
       const estudiantesDB = await db.execute({
         sql: `
           SELECT 
@@ -44,6 +38,22 @@ router.get(
             e.telefono,
             e.foto,
             e.sede,
+
+            e.id_aspirante,
+            e.tipo_sanguineo,
+            e.sexo,
+            e.fecha_nacimiento,
+            e.ciudad_nacimiento,
+            e.departamento_nacimiento,
+            e.pais_nacimiento,
+            e.direccion,
+            e.barrio,
+            e.ciudad_residencia,
+            e.departamento_residencia,
+            e.pais_residencia,
+            e.nombre_institucion,
+            e.fecha_terminacion,
+            e.snp_icfes,
 
             p.id as programa_id,
             p.nombre as programa_nombre,
@@ -72,6 +82,22 @@ router.get(
               telefono: row.telefono,
               foto: row.foto,
               sede: row.sede,
+              // Nuevos campos
+              idAspirante: row.id_aspirante,
+              tipoSanguineo: row.tipo_sanguineo,
+              sexo: row.sexo,
+              fechaNacimiento: row.fecha_nacimiento,
+              ciudadNacimiento: row.ciudad_nacimiento,
+              departamentoNacimiento: row.departamento_nacimiento,
+              paisNacimiento: row.pais_nacimiento,
+              direccion: row.direccion,
+              barrio: row.barrio,
+              ciudadResidencia: row.ciudad_residencia,
+              departamentoResidencia: row.departamento_residencia,
+              paisResidencia: row.pais_residencia,
+              nombreInstitucion: row.nombre_institucion,
+              fechaTerminacion: row.fecha_terminacion,
+              snpIcfes: row.snp_icfes,
             },
             programas: [],
           });
@@ -81,8 +107,7 @@ router.get(
           mapa.get(row.id).programas.push({
             id: row.programa_id,
             nombre: row.programa_nombre,
-            estudiantePensum:
-              row.estudiantePensum,
+            estudiantePensum: row.estudiantePensum,
             jornada: row.jornada,
             categoria: row.categoria,
             situacion: row.situacion,
@@ -93,102 +118,59 @@ router.get(
       const filtrados = [];
 
       for (const item of mapa.values()) {
-        const nombre = normalizar(
-          item.estudiante.nombre
-        );
+        const nombre = normalizar(item.estudiante.nombre);
+        const documento = item.estudiante.documento;
+        const usuario = normalizar(item.estudiante.usuario || "");
+        const correo = normalizar(item.estudiante.correo || "");
+        const telefono = normalizar(item.estudiante.telefono || "");
+        const sede = normalizar(item.estudiante.sede || "");
+        // Opcional: permitir búsqueda también en los nuevos campos (p.ej. nombreInstitucion)
+        const nombreInstitucion = normalizar(item.estudiante.nombreInstitucion || "");
+        const programas = item.programas.map((p) => normalizar(p.nombre));
 
-        const documento =
-          item.estudiante.documento;
-
-        const usuario = normalizar(
-          item.estudiante.usuario || ""
-        );
-
-        const correo = normalizar(
-          item.estudiante.correo || ""
-        );
-
-        const telefono = normalizar(
-          item.estudiante.telefono || ""
-        );
-
-        const sede = normalizar(
-          item.estudiante.sede || ""
-        );
-
-        const programas =
-          item.programas.map((p) =>
-            normalizar(p.nombre)
+        const coincide = palabras.every((palabra) => {
+          return (
+            nombre.includes(palabra) ||
+            documento.includes(palabra) ||
+            usuario.includes(palabra) ||
+            correo.includes(palabra) ||
+            telefono.includes(palabra) ||
+            sede.includes(palabra) ||
+            nombreInstitucion.includes(palabra) ||
+            programas.some((p) => p.includes(palabra))
           );
-
-        const coincide =
-          palabras.every((palabra) => {
-            return (
-              nombre.includes(palabra) ||
-              documento.includes(palabra) ||
-              usuario.includes(palabra) ||
-              correo.includes(palabra) ||
-              telefono.includes(
-                palabra
-              ) ||
-              sede.includes(palabra) ||
-              programas.some((p) =>
-                p.includes(palabra)
-              )
-            );
-          });
+        });
 
         if (coincide) {
           filtrados.push(item);
         }
       }
 
-      const total =
-        filtrados.length;
-
-      const totalPages = Math.ceil(
-        total / ITEMS_PER_PAGE
-      );
-
-      const start =
-        (page - 1) * ITEMS_PER_PAGE;
-
-      const end =
-        start + ITEMS_PER_PAGE;
-
-      const paginaActual =
-        filtrados.slice(start, end);
+      const total = filtrados.length;
+      const totalPages = Math.ceil(total / ITEMS_PER_PAGE);
+      const start = (page - 1) * ITEMS_PER_PAGE;
+      const end = start + ITEMS_PER_PAGE;
+      const paginaActual = filtrados.slice(start, end);
 
       const resultadoFinal = [];
 
       for (const item of paginaActual) {
-        const programasConLiquidaciones =
-          [];
+        const programasConLiquidaciones = [];
 
         for (const prog of item.programas) {
-          const liquidaciones =
-            await db.execute({
-              sql: `
-                SELECT * 
-                FROM liquidaciones 
-                WHERE programa_id = ?
-                ORDER BY anio DESC, periodo DESC
-              `,
-              args: [prog.id],
-            });
-
+          const liquidaciones = await db.execute({
+            sql: `SELECT * FROM liquidaciones WHERE programa_id = ? ORDER BY anio DESC, periodo DESC`,
+            args: [prog.id],
+          });
           programasConLiquidaciones.push({
             ...prog,
-            liquidaciones:
-              liquidaciones.rows,
+            liquidaciones: liquidaciones.rows,
           });
         }
 
         resultadoFinal.push({
-          estudiante:
-            item.estudiante,
-          programas:
-            programasConLiquidaciones,
+          estudiante: item.estudiante,
+          programas: programasConLiquidaciones,
         });
       }
 
@@ -200,11 +182,7 @@ router.get(
       });
     } catch (error) {
       console.error(error);
-
-      res.status(500).json({
-        error:
-          "Error interno del servidor",
-      });
+      res.status(500).json({ error: "Error interno del servidor" });
     }
   }
 );
@@ -214,12 +192,10 @@ router.get(
   authMiddleware,
   async (req, res) => {
     try {
-      const { documento } =
-        req.params;
+      const { documento } = req.params;
 
-      const estudiante =
-        await db.execute({
-          sql: `
+      const estudiante = await db.execute({
+        sql: `
           SELECT 
             id,
             documento,
@@ -228,66 +204,85 @@ router.get(
             correo,
             telefono,
             foto,
-            sede
+            sede,
+            id_aspirante,
+            tipo_sanguineo,
+            sexo,
+            fecha_nacimiento,
+            ciudad_nacimiento,
+            departamento_nacimiento,
+            pais_nacimiento,
+            direccion,
+            barrio,
+            ciudad_residencia,
+            departamento_residencia,
+            pais_residencia,
+            nombre_institucion,
+            fecha_terminacion,
+            snp_icfes
           FROM estudiantes
           WHERE documento = ?
         `,
-          args: [documento],
-        });
+        args: [documento],
+      });
 
-      if (
-        !estudiante.rows.length
-      ) {
-        return res.status(404).json({
-          error: "No encontrado",
-        });
+      if (!estudiante.rows.length) {
+        return res.status(404).json({ error: "No encontrado" });
       }
 
-      const est =
-        estudiante.rows[0];
+      const est = estudiante.rows[0];
 
-      const programas =
-        await db.execute({
-          sql: `
-          SELECT *
-          FROM programas
-          WHERE estudiante_id = ?
-        `,
-          args: [est.id],
-        });
+      // Mapear a camelCase para la respuesta
+      const estudianteRespuesta = {
+        id: est.id,
+        documento: est.documento,
+        nombre: est.nombre,
+        usuario: est.usuario,
+        correo: est.correo,
+        telefono: est.telefono,
+        foto: est.foto,
+        sede: est.sede,
+        idAspirante: est.id_aspirante,
+        tipoSanguineo: est.tipo_sanguineo,
+        sexo: est.sexo,
+        fechaNacimiento: est.fecha_nacimiento,
+        ciudadNacimiento: est.ciudad_nacimiento,
+        departamentoNacimiento: est.departamento_nacimiento,
+        paisNacimiento: est.pais_nacimiento,
+        direccion: est.direccion,
+        barrio: est.barrio,
+        ciudadResidencia: est.ciudad_residencia,
+        departamentoResidencia: est.departamento_residencia,
+        paisResidencia: est.pais_residencia,
+        nombreInstitucion: est.nombre_institucion,
+        fechaTerminacion: est.fecha_terminacion,
+        snpIcfes: est.snp_icfes,
+      };
+
+      const programas = await db.execute({
+        sql: `SELECT * FROM programas WHERE estudiante_id = ?`,
+        args: [est.id],
+      });
 
       const result = [];
-
       for (const prog of programas.rows) {
-        const liquidaciones =
-          await db.execute({
-            sql: `
-            SELECT *
-            FROM liquidaciones
-            WHERE programa_id = ?
-            ORDER BY anio DESC, periodo DESC
-          `,
-            args: [prog.id],
-          });
-
+        const liquidaciones = await db.execute({
+          sql: `SELECT * FROM liquidaciones WHERE programa_id = ? ORDER BY anio DESC, periodo DESC`,
+          args: [prog.id],
+        });
         result.push({
           ...prog,
-          liquidaciones:
-            liquidaciones.rows,
+          liquidaciones: liquidaciones.rows,
         });
       }
 
       res.json({
-        estudiante: est,
+        estudiante: estudianteRespuesta,
         programas: result,
       });
     } catch (error) {
       console.error(error);
-
-      res.status(500).json({
-        error:
-          "Error interno del servidor",
-      });
+      res.status(500).json({ error: "Error interno del servidor" });
     }
   }
 );
