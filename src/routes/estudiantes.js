@@ -82,7 +82,7 @@ router.get(
               telefono: row.telefono,
               foto: row.foto,
               sede: row.sede,
-              // Nuevos campos
+              // Nuevos campos (estudiante table)
               idAspirante: row.id_aspirante,
               tipoSanguineo: row.tipo_sanguineo,
               sexo: row.sexo,
