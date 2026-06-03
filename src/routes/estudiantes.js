@@ -3,153 +3,73 @@ import { db } from "../db.js";
 import { authMiddleware } from "../middleware/authMiddleware.js";
 
 const router = express.Router();
+
 const ITEMS_PER_PAGE = 10;
 
-// Normalización en JavaScript (para la query)
 const normalizar = (str = "") =>
   str
     .toLowerCase()
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "");
 
-// Función SQL que normaliza una cadena (elimina tildes y pasa a minúsculas)
-// Se usará en cada columna comparada.
-const sqlNormalize = (col) => `
-  LOWER(
-    REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
-      ${col},
-      'á','a'), 'é','e'), 'í','i'), 'ó','o'), 'ú','u'),
-      'Á','A'), 'É','E'), 'Í','I'), 'Ó','O'), 'Ú','U')
-  )
-`;
-
 router.get("/search", authMiddleware, async (req, res) => {
   try {
     const { q } = req.query;
-    let page = parseInt(req.query.page || "1");
-    if (isNaN(page)) page = 1;
+    const page = parseInt(req.query.page || "1");
 
     if (!q) {
       return res.status(400).json({ error: "Query requerida" });
     }
 
     const palabras = normalizar(q).split(" ").filter(Boolean);
-    if (palabras.length === 0) {
-      return res.status(400).json({ error: "Consulta vacía" });
-    }
 
-    // Construir condiciones para cada palabra (AND entre palabras)
-    // Cada palabra debe cumplir: (estudiante cumple en algún campo) OR (algún programa cumple)
-    const whereParts = [];
-    const args = [];
+    // Cargar todos los estudiantes y sus programas (igual que antes)
+    const estudiantesDB = await db.execute({
+      sql: `
+        SELECT 
+          e.id,
+          e.documento,
+          e.nombre,
+          e.usuario,
+          e.correo,
+          e.telefono,
+          e.foto,
+          e.sede,
 
-    for (const palabra of palabras) {
-      const likePattern = `%${palabra}%`;
+          e.id_aspirante,
+          e.tipo_sanguineo,
+          e.sexo,
+          e.fecha_nacimiento,
+          e.ciudad_nacimiento,
+          e.departamento_nacimiento,
+          e.pais_nacimiento,
+          e.direccion,
+          e.barrio,
+          e.ciudad_residencia,
+          e.departamento_residencia,
+          e.pais_residencia,
+          e.nombre_institucion,
+          e.fecha_terminacion,
+          e.snp_icfes,
 
-      // Condición para el estudiante (8 campos)
-      const estudianteCond = `
-        ( ${sqlNormalize("e.nombre")} LIKE ? OR
-          e.documento LIKE ? OR
-          ${sqlNormalize("e.usuario")} LIKE ? OR
-          ${sqlNormalize("e.correo")} LIKE ? OR
-          e.telefono LIKE ? OR
-          ${sqlNormalize("e.sede")} LIKE ? OR
-          ${sqlNormalize("e.nombre_institucion")} LIKE ? )
-      `;
-      // Condición para programas (EXISTS)
-      const programaCond = `
-        EXISTS (
-          SELECT 1 FROM programas p
-          WHERE p.estudiante_id = e.id
-            AND ${sqlNormalize("p.nombre")} LIKE ?
-        )
-      `;
-      whereParts.push(`( ${estudianteCond} OR ${programaCond} )`);
-      // Agregar argumentos: 8 para estudiante + 1 para programa = 9 por palabra
-      for (let i = 0; i < 8; i++) args.push(likePattern);
-      args.push(likePattern);
-    }
+          p.id as programa_id,
+          p.nombre as programa_nombre,
+          p.estudiantePensum,
+          p.jornada,
+          p.categoria,
+          p.situacion
 
-    const whereClause = `WHERE ${whereParts.join(" AND ")}`;
+        FROM estudiantes e
+        LEFT JOIN programas p 
+          ON p.estudiante_id = e.id
+      `,
+    });
 
-    // 1. Contar total de estudiantes distintos (para paginación)
-    const countSQL = `
-      SELECT COUNT(DISTINCT e.id) as total
-      FROM estudiantes e
-      ${whereClause}
-    `;
-    const countRes = await db.execute({ sql: countSQL, args });
-    const total = countRes.rows[0]?.total || 0;
-    const totalPages = Math.ceil(total / ITEMS_PER_PAGE);
-    const offset = (page - 1) * ITEMS_PER_PAGE;
+    const mapa = new Map();
 
-    if (total === 0) {
-      return res.json({ page, totalPages: 0, totalResults: 0, results: [] });
-    }
-
-    // 2. Obtener los IDs de los estudiantes de la página actual
-    const idsSQL = `
-      SELECT DISTINCT e.id
-      FROM estudiantes e
-      ${whereClause}
-      ORDER BY e.id
-      LIMIT ? OFFSET ?
-    `;
-    const idsArgs = [...args, ITEMS_PER_PAGE, offset];
-    const idsRes = await db.execute({ sql: idsSQL, args: idsArgs });
-    const estudianteIds = idsRes.rows.map(row => row.id);
-
-    if (estudianteIds.length === 0) {
-      return res.json({ page, totalPages, totalResults: total, results: [] });
-    }
-
-    // 3. Obtener TODOS los datos de esos estudiantes y sus programas (sin liquidaciones aún)
-    const placeholders = estudianteIds.map(() => "?").join(",");
-    const estudiantesSQL = `
-      SELECT 
-        e.id,
-        e.documento,
-        e.nombre,
-        e.usuario,
-        e.correo,
-        e.telefono,
-        e.foto,
-        e.sede,
-        e.id_aspirante,
-        e.tipo_sanguineo,
-        e.sexo,
-        e.fecha_nacimiento,
-        e.ciudad_nacimiento,
-        e.departamento_nacimiento,
-        e.pais_nacimiento,
-        e.direccion,
-        e.barrio,
-        e.ciudad_residencia,
-        e.departamento_residencia,
-        e.pais_residencia,
-        e.nombre_institucion,
-        e.fecha_terminacion,
-        e.snp_icfes,
-        p.id as programa_id,
-        p.nombre as programa_nombre,
-        p.estudiantePensum,
-        p.jornada,
-        p.categoria,
-        p.situacion
-      FROM estudiantes e
-      LEFT JOIN programas p ON p.estudiante_id = e.id
-      WHERE e.id IN (${placeholders})
-      ORDER BY e.id
-    `;
-    const estudiantesData = await db.execute({ sql: estudiantesSQL, args: estudianteIds });
-
-    // 4. Agrupar estudiantes y guardar lista de programas_ids
-    const estudiantesMap = new Map();
-    const programaIds = [];
-
-    for (const row of estudiantesData.rows) {
-      if (!estudiantesMap.has(row.id)) {
-        estudiantesMap.set(row.id, {
+    for (const row of estudiantesDB.rows) {
+      if (!mapa.has(row.id)) {
+        mapa.set(row.id, {
           estudiante: {
             id: row.id,
             documento: row.documento,
@@ -178,31 +98,78 @@ router.get("/search", authMiddleware, async (req, res) => {
           programas: [],
         });
       }
+
       if (row.programa_id) {
-        const prog = {
+        mapa.get(row.id).programas.push({
           id: row.programa_id,
           nombre: row.programa_nombre,
           estudiantePensum: row.estudiantePensum,
           jornada: row.jornada,
           categoria: row.categoria,
           situacion: row.situacion,
-        };
-        estudiantesMap.get(row.id).programas.push(prog);
-        programaIds.push(row.programa_id);
+        });
       }
     }
 
-    // 5. Obtener todas las liquidaciones de esos programas en UNA consulta
-    const liquidacionesMap = new Map(); // key: programa_id, value: array de liquidaciones
-    if (programaIds.length > 0) {
-      const progPlaceholders = programaIds.map(() => "?").join(",");
-      const liqSQL = `
+    // Filtrar estudiantes según búsqueda (exactamente igual que original)
+    const filtrados = [];
+
+    for (const item of mapa.values()) {
+      const nombre = normalizar(item.estudiante.nombre);
+      const documento = item.estudiante.documento;
+      const usuario = normalizar(item.estudiante.usuario || "");
+      const correo = normalizar(item.estudiante.correo || "");
+      const telefono = normalizar(item.estudiante.telefono || "");
+      const sede = normalizar(item.estudiante.sede || "");
+      const nombreInstitucion = normalizar(item.estudiante.nombreInstitucion || "");
+      const programas = item.programas.map((p) => normalizar(p.nombre));
+
+      const coincide = palabras.every((palabra) => {
+        return (
+          nombre.includes(palabra) ||
+          documento.includes(palabra) ||
+          usuario.includes(palabra) ||
+          correo.includes(palabra) ||
+          telefono.includes(palabra) ||
+          sede.includes(palabra) ||
+          nombreInstitucion.includes(palabra) ||
+          programas.some((p) => p.includes(palabra))
+        );
+      });
+
+      if (coincide) {
+        filtrados.push(item);
+      }
+    }
+
+    const total = filtrados.length;
+    const totalPages = Math.ceil(total / ITEMS_PER_PAGE);
+    const start = (page - 1) * ITEMS_PER_PAGE;
+    const end = start + ITEMS_PER_PAGE;
+    const paginaActual = filtrados.slice(start, end);
+
+    // 🚀 OPTIMIZACIÓN: Obtener TODAS las liquidaciones de los programas de la página en una sola consulta
+    // Primero recolectamos los ids de programa que aparecen en la página actual
+    const programaIdsEnPagina = new Set();
+    for (const item of paginaActual) {
+      for (const prog of item.programas) {
+        programaIdsEnPagina.add(prog.id);
+      }
+    }
+
+    const liquidacionesMap = new Map(); // programa_id -> array de liquidaciones
+    if (programaIdsEnPagina.size > 0) {
+      const placeholders = Array.from(programaIdsEnPagina).map(() => "?").join(",");
+      const liquidacionesSQL = `
         SELECT * FROM liquidaciones
-        WHERE programa_id IN (${progPlaceholders})
+        WHERE programa_id IN (${placeholders})
         ORDER BY anio DESC, periodo DESC
       `;
-      const liquidacionesData = await db.execute({ sql: liqSQL, args: programaIds });
-      for (const liq of liquidacionesData.rows) {
+      const liquidacionesResult = await db.execute({
+        sql: liquidacionesSQL,
+        args: Array.from(programaIdsEnPagina),
+      });
+      for (const liq of liquidacionesResult.rows) {
         if (!liquidacionesMap.has(liq.programa_id)) {
           liquidacionesMap.set(liq.programa_id, []);
         }
@@ -210,14 +177,14 @@ router.get("/search", authMiddleware, async (req, res) => {
       }
     }
 
-    // 6. Construir la respuesta final (mismo formato que el original)
-    const results = [];
-    for (const item of estudiantesMap.values()) {
-      const programasConLiquidaciones = item.programas.map(prog => ({
+    // Construir resultado final usando el mapa de liquidaciones
+    const resultadoFinal = [];
+    for (const item of paginaActual) {
+      const programasConLiquidaciones = item.programas.map((prog) => ({
         ...prog,
-        liquidaciones: liquidacionesMap.get(prog.id) || []
+        liquidaciones: liquidacionesMap.get(prog.id) || [],
       }));
-      results.push({
+      resultadoFinal.push({
         estudiante: item.estudiante,
         programas: programasConLiquidaciones,
       });
@@ -227,7 +194,7 @@ router.get("/search", authMiddleware, async (req, res) => {
       page,
       totalPages,
       totalResults: total,
-      results,
+      results: resultadoFinal,
     });
   } catch (error) {
     console.error(error);
@@ -236,7 +203,7 @@ router.get("/search", authMiddleware, async (req, res) => {
 });
 
 router.get("/:documento", authMiddleware, async (req, res) => {
-  // Este endpoint ya era eficiente (por índice en documento). Solo se adaptan los nombres de campo.
+  // Sin cambios, ya funciona bien
   try {
     const { documento } = req.params;
 
@@ -290,16 +257,32 @@ router.get("/:documento", authMiddleware, async (req, res) => {
       args: [est.id],
     });
 
-    const result = [];
-    for (const prog of programas.rows) {
-      const liquidaciones = await db.execute({
-        sql: `SELECT * FROM liquidaciones WHERE programa_id = ? ORDER BY anio DESC, periodo DESC`,
-        args: [prog.id],
-      });
-      result.push({ ...prog, liquidaciones: liquidaciones.rows });
+    // También optimizamos las liquidaciones aquí (opcional)
+    const programaIds = programas.rows.map(p => p.id);
+    const liquidacionesMap = new Map();
+    if (programaIds.length > 0) {
+      const placeholders = programaIds.map(() => "?").join(",");
+      const liqSQL = `
+        SELECT * FROM liquidaciones
+        WHERE programa_id IN (${placeholders})
+        ORDER BY anio DESC, periodo DESC
+      `;
+      const liqResult = await db.execute({ sql: liqSQL, args: programaIds });
+      for (const liq of liqResult.rows) {
+        if (!liquidacionesMap.has(liq.programa_id)) liquidacionesMap.set(liq.programa_id, []);
+        liquidacionesMap.get(liq.programa_id).push(liq);
+      }
     }
 
-    res.json({ estudiante: estudianteRespuesta, programas: result });
+    const result = programas.rows.map(prog => ({
+      ...prog,
+      liquidaciones: liquidacionesMap.get(prog.id) || [],
+    }));
+
+    res.json({
+      estudiante: estudianteRespuesta,
+      programas: result,
+    });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Error interno del servidor" });
