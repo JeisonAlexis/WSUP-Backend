@@ -5,17 +5,21 @@ import { authMiddleware } from "../middleware/authMiddleware.js";
 const router = express.Router();
 const ITEMS_PER_PAGE = 10;
 
-// Función para normalizar texto en SQL (eliminar tildes y pasar a minúscula)
+// Función para normalizar texto (eliminar tildes y pasar a minúscula) en JS
+const normalizar = (str = "") =>
+  str
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+
+// Versión para usar dentro de SQL (reemplazo básico de tildes)
 const normalizarSQL = (str) => {
-  let normalized = str.toLowerCase();
-  const acentos = {
-    á: 'a', é: 'e', í: 'i', ó: 'o', ú: 'u',
-    ñ: 'n', Á: 'a', É: 'e', Í: 'i', Ó: 'o', Ú: 'u', Ñ: 'n'
+  let s = str.toLowerCase();
+  const map = {
+    'á': 'a', 'é': 'e', 'í': 'i', 'ó': 'o', 'ú': 'u',
+    'ñ': 'n', 'ü': 'u'
   };
-  for (let [acc, sin] of Object.entries(acentos)) {
-    normalized = normalized.replace(new RegExp(acc, 'g'), sin);
-  }
-  return normalized;
+  return s.replace(/[áéíóúñü]/g, (match) => map[match] || match);
 };
 
 router.get("/search", authMiddleware, async (req, res) => {
@@ -27,39 +31,44 @@ router.get("/search", authMiddleware, async (req, res) => {
       return res.status(400).json({ error: "Query requerida" });
     }
 
-    // Normalizar la búsqueda
-    const busqueda = normalizarSQL(q);
-    const palabras = busqueda.split(" ").filter(Boolean);
+    const busquedaNormalizada = normalizar(q);
+    const palabras = busquedaNormalizada.split(" ").filter(Boolean);
 
-    // Construir condiciones WHERE para búsqueda en múltiples columnas
-    let whereConditions = [];
-    const args = [];
-
-    // Para cada palabra, agregamos condiciones que busquen en todas las columnas relevantes
-    for (let palabra of palabras) {
-      const likePattern = `%${palabra}%`;
-      whereConditions.push(`
-        ( LOWER(e.nombre) LIKE ? OR
-          LOWER(e.documento) LIKE ? OR
-          LOWER(e.usuario) LIKE ? OR
-          LOWER(e.correo) LIKE ? OR
-          LOWER(e.telefono) LIKE ? OR
-          LOWER(e.sede) LIKE ? OR
-          LOWER(e.nombre_institucion) LIKE ? )
-      `);
-      // Agregamos 7 argumentos por cada palabra (una por cada columna)
-      for (let i = 0; i < 7; i++) args.push(likePattern);
+    if (palabras.length === 0) {
+      return res.status(400).json({ error: "Consulta vacía" });
     }
 
-    const whereClause = whereConditions.length
-      ? `WHERE ${whereConditions.join(" AND ")}`
-      : "";
+    // Construir condiciones para cada palabra: debe existir en estudiante O en algún programa
+    const condicionesPorPalabra = [];
+    const args = [];
 
-    // 1. Primero contar el total de resultados (sin paginación)
+    for (let palabra of palabras) {
+      const likePattern = `%${palabra}%`;
+      // Condición para estudiante (varias columnas)
+      const condicionesEstudiante = `
+        ( LOWER(e.nombre) LIKE ? OR
+          LOWER(e.documento) LIKE ? OR
+        )
+      `;
+      // Condición para programas: existe al menos un programa cuyo nombre contenga la palabra
+      const condicionPrograma = `
+        EXISTS (
+          SELECT 1 FROM programas p
+          WHERE p.estudiante_id = e.id AND LOWER(p.nombre) LIKE ?
+        )
+      `;
+      condicionesPorPalabra.push(`(${condicionesEstudiante} OR ${condicionPrograma})`);
+      // Añadir argumentos: 7 para estudiante + 1 para programa = 8 por palabra
+      for (let i = 0; i < 7; i++) args.push(likePattern);
+      args.push(likePattern);
+    }
+
+    const whereClause = `WHERE ${condicionesPorPalabra.join(" AND ")}`;
+
+    // 1. Contar total de estudiantes distintos que cumplen
     const countSQL = `
       SELECT COUNT(DISTINCT e.id) as total
       FROM estudiantes e
-      LEFT JOIN programas p ON p.estudiante_id = e.id
       ${whereClause}
     `;
     const countResult = await db.execute({ sql: countSQL, args });
@@ -68,30 +77,25 @@ router.get("/search", authMiddleware, async (req, res) => {
     const offset = (page - 1) * ITEMS_PER_PAGE;
 
     if (total === 0) {
-      return res.json({
-        page,
-        totalPages: 0,
-        totalResults: 0,
-        results: []
-      });
+      return res.json({ page: 1, totalPages: 0, totalResults: 0, results: [] });
     }
 
-    // 2. Obtener los IDs de estudiantes de la página actual
+    // 2. Obtener IDs de estudiantes de la página actual (con la misma condición)
     const idsSQL = `
       SELECT DISTINCT e.id
       FROM estudiantes e
-      LEFT JOIN programas p ON p.estudiante_id = e.id
       ${whereClause}
       ORDER BY e.id
       LIMIT ? OFFSET ?
     `;
-    const idsResult = await db.execute({ sql: idsSQL, args: [...args, ITEMS_PER_PAGE, offset] });
+    const idsArgs = [...args, ITEMS_PER_PAGE, offset];
+    const idsResult = await db.execute({ sql: idsSQL, args: idsArgs });
     const estudianteIds = idsResult.rows.map(row => row.id);
     if (estudianteIds.length === 0) {
       return res.json({ page, totalPages, totalResults: total, results: [] });
     }
 
-    // 3. Obtener todos los estudiantes con sus programas y liquidaciones en pocas consultas
+    // 3. Obtener datos completos de esos estudiantes y sus programas
     const placeholders = estudianteIds.map(() => "?").join(",");
     const estudiantesSQL = `
       SELECT 
@@ -163,7 +167,7 @@ router.get("/search", authMiddleware, async (req, res) => {
             fechaTerminacion: row.fecha_terminacion,
             snpIcfes: row.snp_icfes,
           },
-          programas: []
+          programas: [],
         });
       }
       if (row.programa_id) {
@@ -180,8 +184,8 @@ router.get("/search", authMiddleware, async (req, res) => {
       }
     }
 
-    // 5. Obtener todas las liquidaciones de los programas en una sola consulta
-    const liquidacionesMap = new Map(); // programa_id -> liquidaciones[]
+    // 5. Obtener liquidaciones de esos programas en una sola consulta
+    const liquidacionesMap = new Map();
     if (programaIds.length > 0) {
       const progPlaceholders = programaIds.map(() => "?").join(",");
       const liqSQL = `
@@ -198,7 +202,7 @@ router.get("/search", authMiddleware, async (req, res) => {
       }
     }
 
-    // 6. Armar resultado final
+    // 6. Construir resultado final
     const results = [];
     for (const item of estudiantesMap.values()) {
       const programasConLiq = item.programas.map(prog => ({
@@ -224,94 +228,50 @@ router.get("/search", authMiddleware, async (req, res) => {
 });
 
 router.get("/:documento", authMiddleware, async (req, res) => {
+  // El endpoint por documento no necesita cambios, ya funcionaba bien
   try {
     const { documento } = req.params;
-
     const estudiante = await db.execute({
-      sql: `
-        SELECT 
-          id,
-          documento,
-          nombre,
-          usuario,
-          correo,
-          telefono,
-          foto,
-          sede,
-          id_aspirante,
-          tipo_sanguineo,
-          sexo,
-          fecha_nacimiento,
-          ciudad_nacimiento,
-          departamento_nacimiento,
-          pais_nacimiento,
-          direccion,
-          barrio,
-          ciudad_residencia,
-          departamento_residencia,
-          pais_residencia,
-          nombre_institucion,
-          fecha_terminacion,
-          snp_icfes
-        FROM estudiantes
-        WHERE documento = ?
-      `,
+      sql: `SELECT 
+        id, documento, nombre, usuario, correo, telefono, foto, sede,
+        id_aspirante, tipo_sanguineo, sexo, fecha_nacimiento,
+        ciudad_nacimiento, departamento_nacimiento, pais_nacimiento,
+        direccion, barrio, ciudad_residencia, departamento_residencia,
+        pais_residencia, nombre_institucion, fecha_terminacion, snp_icfes
+      FROM estudiantes WHERE documento = ?`,
       args: [documento],
     });
-
-    if (!estudiante.rows.length) {
+    if (!estudiante.rows.length)
       return res.status(404).json({ error: "No encontrado" });
-    }
-
     const est = estudiante.rows[0];
-
     const estudianteRespuesta = {
-      id: est.id,
-      documento: est.documento,
-      nombre: est.nombre,
-      usuario: est.usuario,
-      correo: est.correo,
-      telefono: est.telefono,
-      foto: est.foto,
-      sede: est.sede,
-      idAspirante: est.id_aspirante,
-      tipoSanguineo: est.tipo_sanguineo,
-      sexo: est.sexo,
+      id: est.id, documento: est.documento, nombre: est.nombre,
+      usuario: est.usuario, correo: est.correo, telefono: est.telefono,
+      foto: est.foto, sede: est.sede, idAspirante: est.id_aspirante,
+      tipoSanguineo: est.tipo_sanguineo, sexo: est.sexo,
       fechaNacimiento: est.fecha_nacimiento,
       ciudadNacimiento: est.ciudad_nacimiento,
       departamentoNacimiento: est.departamento_nacimiento,
-      paisNacimiento: est.pais_nacimiento,
-      direccion: est.direccion,
-      barrio: est.barrio,
-      ciudadResidencia: est.ciudad_residencia,
+      paisNacimiento: est.pais_nacimiento, direccion: est.direccion,
+      barrio: est.barrio, ciudadResidencia: est.ciudad_residencia,
       departamentoResidencia: est.departamento_residencia,
       paisResidencia: est.pais_residencia,
       nombreInstitucion: est.nombre_institucion,
-      fechaTerminacion: est.fecha_terminacion,
-      snpIcfes: est.snp_icfes,
+      fechaTerminacion: est.fecha_terminacion, snpIcfes: est.snp_icfes,
     };
-
     const programas = await db.execute({
       sql: `SELECT * FROM programas WHERE estudiante_id = ?`,
       args: [est.id],
     });
-
     const result = [];
     for (const prog of programas.rows) {
       const liquidaciones = await db.execute({
         sql: `SELECT * FROM liquidaciones WHERE programa_id = ? ORDER BY anio DESC, periodo DESC`,
         args: [prog.id],
       });
-      result.push({
-        ...prog,
-        liquidaciones: liquidaciones.rows,
-      });
+      result.push({ ...prog, liquidaciones: liquidaciones.rows });
     }
-
-    res.json({
-      estudiante: estudianteRespuesta,
-      programas: result,
-    });
+    res.json({ estudiante: estudianteRespuesta, programas: result });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Error interno del servidor" });
