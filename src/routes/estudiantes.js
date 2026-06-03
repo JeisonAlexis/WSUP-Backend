@@ -7,7 +7,7 @@ const router = express.Router();
 const ITEMS_PER_PAGE = 10;
 
 const normalizar = (str = "") =>
-  str
+  String(str)
     .toLowerCase()
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "");
@@ -15,15 +15,18 @@ const normalizar = (str = "") =>
 router.get("/search", authMiddleware, async (req, res) => {
   try {
     const { q } = req.query;
-    const page = parseInt(req.query.page || "1");
+    const page = parseInt(req.query.page || "1", 10);
 
     if (!q) {
-      return res.status(400).json({ error: "Query requerida" });
+      return res.status(400).json({
+        error: "Query requerida",
+      });
     }
 
-    const palabras = normalizar(q).split(" ").filter(Boolean);
+    const palabras = normalizar(q)
+      .split(/\s+/)
+      .filter(Boolean);
 
-    // Cargar todos los estudiantes y sus programas (igual que antes)
     const estudiantesDB = await db.execute({
       sql: `
         SELECT 
@@ -52,24 +55,26 @@ router.get("/search", authMiddleware, async (req, res) => {
           e.fecha_terminacion,
           e.snp_icfes,
 
-          p.id as programa_id,
-          p.nombre as programa_nombre,
+          p.id AS programa_id,
+          p.nombre AS programa_nombre,
           p.estudiantePensum,
           p.jornada,
           p.categoria,
           p.situacion
 
         FROM estudiantes e
-        LEFT JOIN programas p 
+        LEFT JOIN programas p
           ON p.estudiante_id = e.id
       `,
     });
 
-    const mapa = new Map();
+    const estudiantesMap = new Map();
 
     for (const row of estudiantesDB.rows) {
-      if (!mapa.has(row.id)) {
-        mapa.set(row.id, {
+      let estudiante = estudiantesMap.get(row.id);
+
+      if (!estudiante) {
+        estudiante = {
           estudiante: {
             id: row.id,
             documento: row.documento,
@@ -79,6 +84,7 @@ router.get("/search", authMiddleware, async (req, res) => {
             telefono: row.telefono,
             foto: row.foto,
             sede: row.sede,
+
             idAspirante: row.id_aspirante,
             tipoSanguineo: row.tipo_sanguineo,
             sexo: row.sexo,
@@ -96,11 +102,13 @@ router.get("/search", authMiddleware, async (req, res) => {
             snpIcfes: row.snp_icfes,
           },
           programas: [],
-        });
+        };
+
+        estudiantesMap.set(row.id, estudiante);
       }
 
       if (row.programa_id) {
-        mapa.get(row.id).programas.push({
+        estudiante.programas.push({
           id: row.programa_id,
           nombre: row.programa_nombre,
           estudiantePensum: row.estudiantePensum,
@@ -111,31 +119,23 @@ router.get("/search", authMiddleware, async (req, res) => {
       }
     }
 
-    // Filtrar estudiantes según búsqueda (exactamente igual que original)
     const filtrados = [];
 
-    for (const item of mapa.values()) {
-      const nombre = normalizar(item.estudiante.nombre);
-      const documento = item.estudiante.documento;
-      const usuario = normalizar(item.estudiante.usuario || "");
-      const correo = normalizar(item.estudiante.correo || "");
-      const telefono = normalizar(item.estudiante.telefono || "");
-      const sede = normalizar(item.estudiante.sede || "");
-      const nombreInstitucion = normalizar(item.estudiante.nombreInstitucion || "");
-      const programas = item.programas.map((p) => normalizar(p.nombre));
+    for (const item of estudiantesMap.values()) {
+      const textoBusqueda = normalizar([
+        item.estudiante.nombre,
+        item.estudiante.documento,
+        item.estudiante.usuario,
+        item.estudiante.correo,
+        item.estudiante.telefono,
+        item.estudiante.sede,
+        item.estudiante.nombreInstitucion,
+        ...item.programas.map((p) => p.nombre),
+      ].join(" "));
 
-      const coincide = palabras.every((palabra) => {
-        return (
-          nombre.includes(palabra) ||
-          documento.includes(palabra) ||
-          usuario.includes(palabra) ||
-          correo.includes(palabra) ||
-          telefono.includes(palabra) ||
-          sede.includes(palabra) ||
-          nombreInstitucion.includes(palabra) ||
-          programas.some((p) => p.includes(palabra))
-        );
-      });
+      const coincide = palabras.every((palabra) =>
+        textoBusqueda.includes(palabra)
+      );
 
       if (coincide) {
         filtrados.push(item);
@@ -144,53 +144,52 @@ router.get("/search", authMiddleware, async (req, res) => {
 
     const total = filtrados.length;
     const totalPages = Math.ceil(total / ITEMS_PER_PAGE);
+
     const start = (page - 1) * ITEMS_PER_PAGE;
-    const end = start + ITEMS_PER_PAGE;
-    const paginaActual = filtrados.slice(start, end);
+    const paginaActual = filtrados.slice(
+      start,
+      start + ITEMS_PER_PAGE
+    );
 
-    // 🚀 OPTIMIZACIÓN: Obtener TODAS las liquidaciones de los programas de la página en una sola consulta
-    // Primero recolectamos los ids de programa que aparecen en la página actual
-    const programaIdsEnPagina = new Set();
-    for (const item of paginaActual) {
-      for (const prog of item.programas) {
-        programaIdsEnPagina.add(prog.id);
-      }
-    }
+    const programaIds = paginaActual.flatMap((e) =>
+      e.programas.map((p) => p.id)
+    );
 
-    const liquidacionesMap = new Map(); // programa_id -> array de liquidaciones
-    if (programaIdsEnPagina.size > 0) {
-      const placeholders = Array.from(programaIdsEnPagina).map(() => "?").join(",");
-      const liquidacionesSQL = `
-        SELECT * FROM liquidaciones
-        WHERE programa_id IN (${placeholders})
-        ORDER BY anio DESC, periodo DESC
-      `;
-      const liquidacionesResult = await db.execute({
-        sql: liquidacionesSQL,
-        args: Array.from(programaIdsEnPagina),
+    let liquidacionesMap = new Map();
+
+    if (programaIds.length) {
+      const placeholders = programaIds.map(() => "?").join(",");
+
+      const liquidacionesDB = await db.execute({
+        sql: `
+          SELECT *
+          FROM liquidaciones
+          WHERE programa_id IN (${placeholders})
+          ORDER BY programa_id, anio DESC, periodo DESC
+        `,
+        args: programaIds,
       });
-      for (const liq of liquidacionesResult.rows) {
-        if (!liquidacionesMap.has(liq.programa_id)) {
-          liquidacionesMap.set(liq.programa_id, []);
+
+      liquidacionesMap = liquidacionesDB.rows.reduce((map, liq) => {
+        if (!map.has(liq.programa_id)) {
+          map.set(liq.programa_id, []);
         }
-        liquidacionesMap.get(liq.programa_id).push(liq);
-      }
+
+        map.get(liq.programa_id).push(liq);
+
+        return map;
+      }, new Map());
     }
 
-    // Construir resultado final usando el mapa de liquidaciones
-    const resultadoFinal = [];
-    for (const item of paginaActual) {
-      const programasConLiquidaciones = item.programas.map((prog) => ({
+    const resultadoFinal = paginaActual.map((item) => ({
+      estudiante: item.estudiante,
+      programas: item.programas.map((prog) => ({
         ...prog,
         liquidaciones: liquidacionesMap.get(prog.id) || [],
-      }));
-      resultadoFinal.push({
-        estudiante: item.estudiante,
-        programas: programasConLiquidaciones,
-      });
-    }
+      })),
+    }));
 
-    res.json({
+    return res.json({
       page,
       totalPages,
       totalResults: total,
@@ -198,23 +197,48 @@ router.get("/search", authMiddleware, async (req, res) => {
     });
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "Error interno del servidor" });
+
+    return res.status(500).json({
+      error: "Error interno del servidor",
+    });
   }
 });
 
 router.get("/:documento", authMiddleware, async (req, res) => {
-  // Sin cambios, ya funciona bien
   try {
     const { documento } = req.params;
 
     const estudiante = await db.execute({
       sql: `
         SELECT 
-          id, documento, nombre, usuario, correo, telefono, foto, sede,
-          id_aspirante, tipo_sanguineo, sexo, fecha_nacimiento,
-          ciudad_nacimiento, departamento_nacimiento, pais_nacimiento,
-          direccion, barrio, ciudad_residencia, departamento_residencia,
-          pais_residencia, nombre_institucion, fecha_terminacion, snp_icfes
+          id,
+          documento,
+          nombre,
+          usuario,
+          correo,
+          telefono,
+          foto,
+          sede,
+
+          id_aspirante,
+          tipo_sanguineo,
+          sexo,
+          fecha_nacimiento,
+          ciudad_nacimiento,
+          departamento_nacimiento,
+          pais_nacimiento,
+
+          direccion,
+          barrio,
+
+          ciudad_residencia,
+          departamento_residencia,
+          pais_residencia,
+
+          nombre_institucion,
+          fecha_terminacion,
+          snp_icfes
+
         FROM estudiantes
         WHERE documento = ?
       `,
@@ -222,10 +246,13 @@ router.get("/:documento", authMiddleware, async (req, res) => {
     });
 
     if (!estudiante.rows.length) {
-      return res.status(404).json({ error: "No encontrado" });
+      return res.status(404).json({
+        error: "No encontrado",
+      });
     }
 
     const est = estudiante.rows[0];
+
     const estudianteRespuesta = {
       id: est.id,
       documento: est.documento,
@@ -235,6 +262,7 @@ router.get("/:documento", authMiddleware, async (req, res) => {
       telefono: est.telefono,
       foto: est.foto,
       sede: est.sede,
+
       idAspirante: est.id_aspirante,
       tipoSanguineo: est.tipo_sanguineo,
       sexo: est.sexo,
@@ -242,50 +270,71 @@ router.get("/:documento", authMiddleware, async (req, res) => {
       ciudadNacimiento: est.ciudad_nacimiento,
       departamentoNacimiento: est.departamento_nacimiento,
       paisNacimiento: est.pais_nacimiento,
+
       direccion: est.direccion,
       barrio: est.barrio,
+
       ciudadResidencia: est.ciudad_residencia,
       departamentoResidencia: est.departamento_residencia,
       paisResidencia: est.pais_residencia,
+
       nombreInstitucion: est.nombre_institucion,
       fechaTerminacion: est.fecha_terminacion,
       snpIcfes: est.snp_icfes,
     };
 
     const programas = await db.execute({
-      sql: `SELECT * FROM programas WHERE estudiante_id = ?`,
+      sql: `
+        SELECT *
+        FROM programas
+        WHERE estudiante_id = ?
+      `,
       args: [est.id],
     });
 
-    // También optimizamos las liquidaciones aquí (opcional)
-    const programaIds = programas.rows.map(p => p.id);
-    const liquidacionesMap = new Map();
-    if (programaIds.length > 0) {
+    const programaIds = programas.rows.map((p) => p.id);
+
+    let liquidacionesMap = new Map();
+
+    if (programaIds.length) {
       const placeholders = programaIds.map(() => "?").join(",");
-      const liqSQL = `
-        SELECT * FROM liquidaciones
-        WHERE programa_id IN (${placeholders})
-        ORDER BY anio DESC, periodo DESC
-      `;
-      const liqResult = await db.execute({ sql: liqSQL, args: programaIds });
-      for (const liq of liqResult.rows) {
-        if (!liquidacionesMap.has(liq.programa_id)) liquidacionesMap.set(liq.programa_id, []);
-        liquidacionesMap.get(liq.programa_id).push(liq);
-      }
+
+      const liquidacionesDB = await db.execute({
+        sql: `
+          SELECT *
+          FROM liquidaciones
+          WHERE programa_id IN (${placeholders})
+          ORDER BY programa_id, anio DESC, periodo DESC
+        `,
+        args: programaIds,
+      });
+
+      liquidacionesMap = liquidacionesDB.rows.reduce((map, liq) => {
+        if (!map.has(liq.programa_id)) {
+          map.set(liq.programa_id, []);
+        }
+
+        map.get(liq.programa_id).push(liq);
+
+        return map;
+      }, new Map());
     }
 
-    const result = programas.rows.map(prog => ({
+    const result = programas.rows.map((prog) => ({
       ...prog,
       liquidaciones: liquidacionesMap.get(prog.id) || [],
     }));
 
-    res.json({
+    return res.json({
       estudiante: estudianteRespuesta,
       programas: result,
     });
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "Error interno del servidor" });
+
+    return res.status(500).json({
+      error: "Error interno del servidor",
+    });
   }
 });
 
