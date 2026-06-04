@@ -12,21 +12,24 @@ const normalizar = (str = "") =>
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "");
 
+// ============================================================
+// BÚSQUEDA CON PAGINACIÓN (usa JOIN con estudiante_programa)
+// ============================================================
 router.get("/search", authMiddleware, async (req, res) => {
   try {
     const { q } = req.query;
     const page = parseInt(req.query.page || "1", 10);
 
     if (!q) {
-      return res.status(400).json({
-        error: "Query requerida",
-      });
+      return res.status(400).json({ error: "Query requerida" });
     }
 
     const palabras = normalizar(q)
       .split(/\s+/)
       .filter(Boolean);
 
+    // 1. Obtener todos los estudiantes con sus programas asociados
+    //    (ahora a través de la tabla estudiante_programa)
     const estudiantesDB = await db.execute({
       sql: `
         SELECT 
@@ -57,17 +60,18 @@ router.get("/search", authMiddleware, async (req, res) => {
 
           p.id AS programa_id,
           p.nombre AS programa_nombre,
-          p.estudiantePensum,
-          p.jornada,
-          p.categoria,
-          p.situacion
+          ep.estudiantePensum,
+          ep.jornada,
+          ep.categoria,
+          ep.situacion
 
         FROM estudiantes e
-        LEFT JOIN programas p
-          ON p.estudiante_id = e.id
+        LEFT JOIN estudiante_programa ep ON ep.estudiante_id = e.id
+        LEFT JOIN programas p ON p.id = ep.programa_id
       `,
     });
 
+    // 2. Agrupar los programas por estudiante
     const estudiantesMap = new Map();
 
     for (const row of estudiantesDB.rows) {
@@ -119,6 +123,7 @@ router.get("/search", authMiddleware, async (req, res) => {
       }
     }
 
+    // 3. Filtrar por las palabras de búsqueda
     const filtrados = [];
 
     for (const item of estudiantesMap.values()) {
@@ -142,15 +147,13 @@ router.get("/search", authMiddleware, async (req, res) => {
       }
     }
 
+    // 4. Paginación
     const total = filtrados.length;
     const totalPages = Math.ceil(total / ITEMS_PER_PAGE);
-
     const start = (page - 1) * ITEMS_PER_PAGE;
-    const paginaActual = filtrados.slice(
-      start,
-      start + ITEMS_PER_PAGE
-    );
+    const paginaActual = filtrados.slice(start, start + ITEMS_PER_PAGE);
 
+    // 5. Obtener liquidaciones para los programas que aparecen en la página actual
     const programaIds = paginaActual.flatMap((e) =>
       e.programas.map((p) => p.id)
     );
@@ -159,7 +162,6 @@ router.get("/search", authMiddleware, async (req, res) => {
 
     if (programaIds.length) {
       const placeholders = programaIds.map(() => "?").join(",");
-
       const liquidacionesDB = await db.execute({
         sql: `
           SELECT *
@@ -174,13 +176,12 @@ router.get("/search", authMiddleware, async (req, res) => {
         if (!map.has(liq.programa_id)) {
           map.set(liq.programa_id, []);
         }
-
         map.get(liq.programa_id).push(liq);
-
         return map;
       }, new Map());
     }
 
+    // 6. Armar respuesta final
     const resultadoFinal = paginaActual.map((item) => ({
       estudiante: item.estudiante,
       programas: item.programas.map((prog) => ({
@@ -197,18 +198,19 @@ router.get("/search", authMiddleware, async (req, res) => {
     });
   } catch (error) {
     console.error(error);
-
-    return res.status(500).json({
-      error: "Error interno del servidor",
-    });
+    return res.status(500).json({ error: "Error interno del servidor" });
   }
 });
 
+// ============================================================
+// OBTENER ESTUDIANTE POR DOCUMENTO (con sus programas y liquidaciones)
+// ============================================================
 router.get("/:documento", authMiddleware, async (req, res) => {
   try {
     const { documento } = req.params;
 
-    const estudiante = await db.execute({
+    // 1. Obtener datos del estudiante
+    const estudianteRes = await db.execute({
       sql: `
         SELECT 
           id,
@@ -238,20 +240,17 @@ router.get("/:documento", authMiddleware, async (req, res) => {
           nombre_institucion,
           fecha_terminacion,
           snp_icfes
-
         FROM estudiantes
         WHERE documento = ?
       `,
       args: [documento],
     });
 
-    if (!estudiante.rows.length) {
-      return res.status(404).json({
-        error: "No encontrado",
-      });
+    if (!estudianteRes.rows.length) {
+      return res.status(404).json({ error: "No encontrado" });
     }
 
-    const est = estudiante.rows[0];
+    const est = estudianteRes.rows[0];
 
     const estudianteRespuesta = {
       id: est.id,
@@ -262,7 +261,6 @@ router.get("/:documento", authMiddleware, async (req, res) => {
       telefono: est.telefono,
       foto: est.foto,
       sede: est.sede,
-
       idAspirante: est.id_aspirante,
       tipoSanguineo: est.tipo_sanguineo,
       sexo: est.sexo,
@@ -270,35 +268,41 @@ router.get("/:documento", authMiddleware, async (req, res) => {
       ciudadNacimiento: est.ciudad_nacimiento,
       departamentoNacimiento: est.departamento_nacimiento,
       paisNacimiento: est.pais_nacimiento,
-
       direccion: est.direccion,
       barrio: est.barrio,
-
       ciudadResidencia: est.ciudad_residencia,
       departamentoResidencia: est.departamento_residencia,
       paisResidencia: est.pais_residencia,
-
       nombreInstitucion: est.nombre_institucion,
       fechaTerminacion: est.fecha_terminacion,
       snpIcfes: est.snp_icfes,
     };
 
-    const programas = await db.execute({
+    // 2. Obtener los programas asociados al estudiante (desde estudiante_programa)
+    const programasRes = await db.execute({
       sql: `
-        SELECT *
-        FROM programas
-        WHERE estudiante_id = ?
+        SELECT 
+          p.id,
+          p.nombre,
+          ep.estudiantePensum,
+          ep.jornada,
+          ep.categoria,
+          ep.situacion
+        FROM estudiante_programa ep
+        JOIN programas p ON p.id = ep.programa_id
+        WHERE ep.estudiante_id = ?
       `,
       args: [est.id],
     });
 
-    const programaIds = programas.rows.map((p) => p.id);
+    const programas = programasRes.rows;
+    const programaIds = programas.map((p) => p.id);
 
+    // 3. Obtener liquidaciones para esos programas
     let liquidacionesMap = new Map();
 
     if (programaIds.length) {
       const placeholders = programaIds.map(() => "?").join(",");
-
       const liquidacionesDB = await db.execute({
         sql: `
           SELECT *
@@ -313,15 +317,19 @@ router.get("/:documento", authMiddleware, async (req, res) => {
         if (!map.has(liq.programa_id)) {
           map.set(liq.programa_id, []);
         }
-
         map.get(liq.programa_id).push(liq);
-
         return map;
       }, new Map());
     }
 
-    const result = programas.rows.map((prog) => ({
-      ...prog,
+    // 4. Armar respuesta
+    const result = programas.map((prog) => ({
+      id: prog.id,
+      nombre: prog.nombre,
+      estudiantePensum: prog.estudiantePensum,
+      jornada: prog.jornada,
+      categoria: prog.categoria,
+      situacion: prog.situacion,
       liquidaciones: liquidacionesMap.get(prog.id) || [],
     }));
 
@@ -331,10 +339,7 @@ router.get("/:documento", authMiddleware, async (req, res) => {
     });
   } catch (error) {
     console.error(error);
-
-    return res.status(500).json({
-      error: "Error interno del servidor",
-    });
+    return res.status(500).json({ error: "Error interno del servidor" });
   }
 });
 
