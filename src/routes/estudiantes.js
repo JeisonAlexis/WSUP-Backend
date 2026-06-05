@@ -5,29 +5,6 @@ import { authMiddleware } from "../middleware/authMiddleware.js";
 const router = express.Router();
 const ITEMS_PER_PAGE = 10;
 
-// ----------------------------------------------------------------------
-// Función para asegurar índices necesarios (se ejecuta una vez al inicio)
-// ----------------------------------------------------------------------
-async function asegurarIndices() {
-  try {
-    // Índice para búsqueda por documento (clave primaria de búsqueda)
-    await db.execute(`CREATE INDEX IF NOT EXISTS idx_estudiantes_documento ON estudiantes(documento)`);
-    // Índice para búsqueda por nombre (ayuda a LIKE 'nombre%')
-    await db.execute(`CREATE INDEX IF NOT EXISTS idx_estudiantes_nombre ON estudiantes(nombre)`);
-    // Índice para búsqueda de programas por nombre
-    await db.execute(`CREATE INDEX IF NOT EXISTS idx_programas_nombre ON programas(nombre)`);
-    // Índice para la relación estudiante-programa
-    await db.execute(`CREATE INDEX IF NOT EXISTS idx_estudiante_programa_estudiante ON estudiante_programa(estudiante_id)`);
-    await db.execute(`CREATE INDEX IF NOT EXISTS idx_estudiante_programa_programa ON estudiante_programa(programa_id)`);
-    // Índice para liquidaciones
-    await db.execute(`CREATE INDEX IF NOT EXISTS idx_liquidaciones_estudiante_programa ON liquidaciones(estudiante_id, programa_id)`);
-    console.log("Índices verificados/creados correctamente.");
-  } catch (error) {
-    console.error("Error creando índices:", error);
-  }
-}
-// Ejecutar la creación de índices al cargar el módulo (no bloquea el inicio)
-asegurarIndices();
 
 // ----------------------------------------------------------------------
 // BÚSQUEDA OPTIMIZADA (solo nombre, documento, programa)
