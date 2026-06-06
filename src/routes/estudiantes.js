@@ -5,8 +5,32 @@ import { authMiddleware } from "../middleware/authMiddleware.js";
 const router = express.Router();
 const ITEMS_PER_PAGE = 10;
 
+// Función para quitar tildes y normalizar minúsculas
+function normalizeString(str) {
+  return str
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/ñ/g, "n"); // opcional, si quieres también normalizar ñ
+}
+
+// Función para construir expresión SQL que normalice un campo (quita tildes y lower)
+function normalizeField(field) {
+  // Aplicamos múltiples REPLACE para quitar vocales acentuadas, diéresis, etc.
+  // Esto es para SQLite, que no tiene función unaccent.
+  // Se aplican en orden.
+  return `
+    LOWER(
+      REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
+      ${field},
+      'á', 'a'), 'é', 'e'), 'í', 'i'), 'ó', 'o'), 'ú', 'u'),
+      'Á', 'a'), 'É', 'e'), 'Í', 'i'), 'Ó', 'o'), 'Ú', 'u')
+    )
+  `;
+}
+
 // ----------------------------------------------------------------------
-// BÚSQUEDA OPTIMIZADA (nombre, documento, programa - con manejo de mayúsculas)
+// BÚSQUEDA OPTIMIZADA con manejo de tildes y mayúsculas/minúsculas
 // ----------------------------------------------------------------------
 router.get("/search", authMiddleware, async (req, res) => {
   try {
@@ -18,8 +42,9 @@ router.get("/search", authMiddleware, async (req, res) => {
     }
 
     const trimmed = q.trim();
+    const normalizedQuery = normalizeString(trimmed); // búsqueda normalizada sin tildes
 
-    // ---------- Caso especial: solo dígitos (documento exacto, rápido con índice) ----------
+    // Si es solo dígitos, buscar por documento exacto (rápido)
     if (/^\d+$/.test(trimmed)) {
       const docRes = await db.execute({
         sql: `SELECT id FROM estudiantes WHERE documento = ?`,
@@ -28,36 +53,38 @@ router.get("/search", authMiddleware, async (req, res) => {
       const estudianteIds = docRes.rows.map(row => row.id);
       const total = estudianteIds.length;
       const totalPages = Math.ceil(total / ITEMS_PER_PAGE);
-
       if (estudianteIds.length === 0) {
         return res.json({ page, totalPages, totalResults: total, results: [] });
       }
-
       return await enviarResultados(res, estudianteIds, page, total, totalPages);
     }
 
-    // ---------- Búsqueda por palabras (cada palabra puede estar en nombre, documento o programa) ----------
-    const palabras = trimmed.split(/\s+/).filter(Boolean);
+    // Dividir en palabras
+    const palabras = normalizedQuery.split(/\s+/).filter(Boolean);
 
-    // Construimos una condición AND por cada palabra. Para cada palabra:
-    // ( LOWER(e.nombre) LIKE LOWER(?) OR LOWER(e.documento) LIKE LOWER(?) OR EXISTS (subconsulta programa) )
+    // Construir condición AND por cada palabra, normalizando campos
     const condicionesPorPalabra = palabras.map(() => {
+      // Normalizamos nombre, documento y programa.nombre
+      const nombreNorm = normalizeField("e.nombre");
+      const docNorm = normalizeField("e.documento");
+      // Para la subconsulta de programas, normalizamos p.nombre
+      const progNorm = normalizeField("p.nombre");
       return `(
-        LOWER(e.nombre) LIKE LOWER(?) OR 
-        LOWER(e.documento) LIKE LOWER(?) OR 
+        ${nombreNorm} LIKE ? OR 
+        ${docNorm} LIKE ? OR 
         EXISTS (
           SELECT 1 
           FROM estudiante_programa ep
           JOIN programas p ON p.id = ep.programa_id
-          WHERE ep.estudiante_id = e.id AND LOWER(p.nombre) LIKE LOWER(?)
+          WHERE ep.estudiante_id = e.id AND ${progNorm} LIKE ?
         )
       )`;
     }).join(" AND ");
 
-    // Argumentos: por cada palabra: %palabra% (tres veces: nombre, documento, programa)
+    // Preparamos los patrones: cada palabra se busca con '%' + palabra + '%'
     const args = palabras.flatMap(p => [`%${p}%`, `%${p}%`, `%${p}%`]);
 
-    // Obtener IDs paginados
+    // Consulta paginada de IDs
     const idsQuery = `
       SELECT e.id
       FROM estudiantes e
@@ -69,7 +96,7 @@ router.get("/search", authMiddleware, async (req, res) => {
     const idsRes = await db.execute({ sql: idsQuery, args: paginationArgs });
     const estudianteIds = idsRes.rows.map(row => row.id);
 
-    // Total de resultados (sin paginar)
+    // Total de resultados
     const totalRes = await db.execute({
       sql: `SELECT COUNT(*) as total FROM estudiantes e WHERE ${condicionesPorPalabra}`,
       args: args,
@@ -89,12 +116,11 @@ router.get("/search", authMiddleware, async (req, res) => {
 });
 
 // ----------------------------------------------------------------------
-// Función auxiliar para armar la respuesta con estudiantes, programas y liquidaciones
+// Función auxiliar para armar la respuesta (igual que antes, sin cambios)
 // ----------------------------------------------------------------------
 async function enviarResultados(res, estudianteIds, page, total, totalPages) {
   const placeholders = estudianteIds.map(() => "?").join(",");
 
-  // 1. Obtener estudiantes con sus programas
   const estudiantesData = await db.execute({
     sql: `
       SELECT 
@@ -115,7 +141,6 @@ async function enviarResultados(res, estudianteIds, page, total, totalPages) {
     args: estudianteIds,
   });
 
-  // Agrupar programas por estudiante
   const estudiantesMap = new Map();
   for (const row of estudiantesData.rows) {
     if (!estudiantesMap.has(row.id)) {
@@ -159,7 +184,7 @@ async function enviarResultados(res, estudianteIds, page, total, totalPages) {
     }
   }
 
-  // 2. Obtener liquidaciones para los pares (estudiante, programa)
+  // Obtener liquidaciones
   const pares = [];
   for (const item of estudiantesMap.values()) {
     for (const prog of item.programas) {
@@ -187,7 +212,6 @@ async function enviarResultados(res, estudianteIds, page, total, totalPages) {
     }
   }
 
-  // 3. Armar respuesta final
   const results = [];
   for (const item of estudiantesMap.values()) {
     const programasConLiquidaciones = item.programas.map(prog => {
@@ -201,7 +225,7 @@ async function enviarResultados(res, estudianteIds, page, total, totalPages) {
 }
 
 // ----------------------------------------------------------------------
-// OBTENER ESTUDIANTE POR DOCUMENTO (sin cambios, con índice)
+// OBTENER ESTUDIANTE POR DOCUMENTO (sin cambios)
 // ----------------------------------------------------------------------
 router.get("/:documento", authMiddleware, async (req, res) => {
   try {
