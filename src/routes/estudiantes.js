@@ -6,7 +6,7 @@ const router = express.Router();
 const ITEMS_PER_PAGE = 10;
 
 // ----------------------------------------------------------------------
-// BÚSQUEDA OPTIMIZADA (nombre, documento, programa - búsqueda flexible)
+// BÚSQUEDA OPTIMIZADA (nombre, documento, programa - con manejo de mayúsculas)
 // ----------------------------------------------------------------------
 router.get("/search", authMiddleware, async (req, res) => {
   try {
@@ -19,7 +19,7 @@ router.get("/search", authMiddleware, async (req, res) => {
 
     const trimmed = q.trim();
 
-    // ---------- Caso especial: solo dígitos (documento exacto) ----------
+    // ---------- Caso especial: solo dígitos (documento exacto, rápido con índice) ----------
     if (/^\d+$/.test(trimmed)) {
       const docRes = await db.execute({
         sql: `SELECT id FROM estudiantes WHERE documento = ?`,
@@ -39,22 +39,22 @@ router.get("/search", authMiddleware, async (req, res) => {
     // ---------- Búsqueda por palabras (cada palabra puede estar en nombre, documento o programa) ----------
     const palabras = trimmed.split(/\s+/).filter(Boolean);
 
-    // Construimos una condición para cada palabra:
-    // ( nombre LIKE ? OR documento LIKE ? OR EXISTS (subconsulta programa) )
+    // Construimos una condición AND por cada palabra. Para cada palabra:
+    // ( LOWER(e.nombre) LIKE LOWER(?) OR LOWER(e.documento) LIKE LOWER(?) OR EXISTS (subconsulta programa) )
     const condicionesPorPalabra = palabras.map(() => {
       return `(
-        e.nombre LIKE ? OR 
-        e.documento LIKE ? OR 
+        LOWER(e.nombre) LIKE LOWER(?) OR 
+        LOWER(e.documento) LIKE LOWER(?) OR 
         EXISTS (
           SELECT 1 
           FROM estudiante_programa ep
           JOIN programas p ON p.id = ep.programa_id
-          WHERE ep.estudiante_id = e.id AND p.nombre LIKE ?
+          WHERE ep.estudiante_id = e.id AND LOWER(p.nombre) LIKE LOWER(?)
         )
       )`;
     }).join(" AND ");
 
-    // Argumentos: 3 por palabra (%palabra% para nombre, documento, programa)
+    // Argumentos: por cada palabra: %palabra% (tres veces: nombre, documento, programa)
     const args = palabras.flatMap(p => [`%${p}%`, `%${p}%`, `%${p}%`]);
 
     // Obtener IDs paginados
@@ -201,7 +201,7 @@ async function enviarResultados(res, estudianteIds, page, total, totalPages) {
 }
 
 // ----------------------------------------------------------------------
-// OBTENER ESTUDIANTE POR DOCUMENTO (índice, sin cambios)
+// OBTENER ESTUDIANTE POR DOCUMENTO (sin cambios, con índice)
 // ----------------------------------------------------------------------
 router.get("/:documento", authMiddleware, async (req, res) => {
   try {
