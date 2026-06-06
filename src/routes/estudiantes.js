@@ -5,9 +5,8 @@ import { authMiddleware } from "../middleware/authMiddleware.js";
 const router = express.Router();
 const ITEMS_PER_PAGE = 10;
 
-
 // ----------------------------------------------------------------------
-// BÚSQUEDA OPTIMIZADA (solo nombre, documento, programa)
+// BÚSQUEDA OPTIMIZADA (nombre, documento, programa - búsqueda flexible)
 // ----------------------------------------------------------------------
 router.get("/search", authMiddleware, async (req, res) => {
   try {
@@ -19,9 +18,8 @@ router.get("/search", authMiddleware, async (req, res) => {
     }
 
     const trimmed = q.trim();
-    
-    // ---------- Caso especial: si es un número (documento) ----------
-    // Si la consulta es solo dígitos, buscar por documento exacto (muy rápido con índice)
+
+    // ---------- Caso especial: solo dígitos (documento exacto) ----------
     if (/^\d+$/.test(trimmed)) {
       const docRes = await db.execute({
         sql: `SELECT id FROM estudiantes WHERE documento = ?`,
@@ -30,69 +28,60 @@ router.get("/search", authMiddleware, async (req, res) => {
       const estudianteIds = docRes.rows.map(row => row.id);
       const total = estudianteIds.length;
       const totalPages = Math.ceil(total / ITEMS_PER_PAGE);
-      
+
       if (estudianteIds.length === 0) {
         return res.json({ page, totalPages, totalResults: total, results: [] });
       }
-      
-      // Obtener datos completos y liquidaciones (misma lógica que abajo)
+
       return await enviarResultados(res, estudianteIds, page, total, totalPages);
     }
 
-    // ---------- Búsqueda por palabras (nombre, documento parcial, programa) ----------
+    // ---------- Búsqueda por palabras (cada palabra puede estar en nombre, documento o programa) ----------
     const palabras = trimmed.split(/\s+/).filter(Boolean);
-    
-    // Construir condiciones para nombre/documento: cada palabra debe aparecer en nombre o documento
-    // Usamos LIKE con comodines al inicio y final (no usa índices, pero es una sola pasada)
-    const condicionesNombreDocumento = palabras.map(() => `(e.nombre LIKE ? OR e.documento LIKE ?)`).join(" AND ");
-    const argsNombreDoc = palabras.flatMap(p => [`%${p}%`, `%${p}%`]);
-    
-    // Condición para programas: el estudiante debe tener AL MENOS UN programa cuyo nombre contenga TODAS las palabras
-    // Esto se logra con una subconsulta que cuenta coincidencias
-    const condicionPrograma = `
-      EXISTS (
-        SELECT 1
-        FROM estudiante_programa ep
-        JOIN programas p ON p.id = ep.programa_id
-        WHERE ep.estudiante_id = e.id
-        AND (
-          ${palabras.map(() => `p.nombre LIKE ?`).join(" AND ")}
+
+    // Construimos una condición para cada palabra:
+    // ( nombre LIKE ? OR documento LIKE ? OR EXISTS (subconsulta programa) )
+    const condicionesPorPalabra = palabras.map(() => {
+      return `(
+        e.nombre LIKE ? OR 
+        e.documento LIKE ? OR 
+        EXISTS (
+          SELECT 1 
+          FROM estudiante_programa ep
+          JOIN programas p ON p.id = ep.programa_id
+          WHERE ep.estudiante_id = e.id AND p.nombre LIKE ?
         )
-        LIMIT 1
-      )
-    `;
-    const argsPrograma = palabras.map(p => `%${p}%`);
-    
-    // Unimos ambas condiciones con OR
-    const whereClause = `(${condicionesNombreDocumento}) OR (${condicionPrograma})`;
-    const allArgs = [...argsNombreDoc, ...argsPrograma];
-    
+      )`;
+    }).join(" AND ");
+
+    // Argumentos: 3 por palabra (%palabra% para nombre, documento, programa)
+    const args = palabras.flatMap(p => [`%${p}%`, `%${p}%`, `%${p}%`]);
+
     // Obtener IDs paginados
     const idsQuery = `
       SELECT e.id
       FROM estudiantes e
-      WHERE ${whereClause}
+      WHERE ${condicionesPorPalabra}
       ORDER BY e.id
       LIMIT ? OFFSET ?
     `;
-    const paginationArgs = [...allArgs, ITEMS_PER_PAGE, (page - 1) * ITEMS_PER_PAGE];
+    const paginationArgs = [...args, ITEMS_PER_PAGE, (page - 1) * ITEMS_PER_PAGE];
     const idsRes = await db.execute({ sql: idsQuery, args: paginationArgs });
     const estudianteIds = idsRes.rows.map(row => row.id);
-    
+
     // Total de resultados (sin paginar)
     const totalRes = await db.execute({
-      sql: `SELECT COUNT(*) as total FROM estudiantes e WHERE ${whereClause}`,
-      args: allArgs,
+      sql: `SELECT COUNT(*) as total FROM estudiantes e WHERE ${condicionesPorPalabra}`,
+      args: args,
     });
     const total = totalRes.rows[0].total;
     const totalPages = Math.ceil(total / ITEMS_PER_PAGE);
-    
+
     if (estudianteIds.length === 0) {
       return res.json({ page, totalPages, totalResults: total, results: [] });
     }
-    
+
     return await enviarResultados(res, estudianteIds, page, total, totalPages);
-    
   } catch (error) {
     console.error(error);
     return res.status(500).json({ error: "Error interno del servidor" });
@@ -104,7 +93,7 @@ router.get("/search", authMiddleware, async (req, res) => {
 // ----------------------------------------------------------------------
 async function enviarResultados(res, estudianteIds, page, total, totalPages) {
   const placeholders = estudianteIds.map(() => "?").join(",");
-  
+
   // 1. Obtener estudiantes con sus programas
   const estudiantesData = await db.execute({
     sql: `
@@ -125,7 +114,7 @@ async function enviarResultados(res, estudianteIds, page, total, totalPages) {
     `,
     args: estudianteIds,
   });
-  
+
   // Agrupar programas por estudiante
   const estudiantesMap = new Map();
   for (const row of estudiantesData.rows) {
@@ -169,7 +158,7 @@ async function enviarResultados(res, estudianteIds, page, total, totalPages) {
       });
     }
   }
-  
+
   // 2. Obtener liquidaciones para los pares (estudiante, programa)
   const pares = [];
   for (const item of estudiantesMap.values()) {
@@ -177,7 +166,7 @@ async function enviarResultados(res, estudianteIds, page, total, totalPages) {
       pares.push([item.estudiante.id, prog.id]);
     }
   }
-  
+
   const liquidacionesMap = new Map();
   if (pares.length > 0) {
     const orConditions = pares.map(() => "(estudiante_id = ? AND programa_id = ?)").join(" OR ");
@@ -197,7 +186,7 @@ async function enviarResultados(res, estudianteIds, page, total, totalPages) {
       liquidacionesMap.get(key).push(liq);
     }
   }
-  
+
   // 3. Armar respuesta final
   const results = [];
   for (const item of estudiantesMap.values()) {
@@ -207,12 +196,12 @@ async function enviarResultados(res, estudianteIds, page, total, totalPages) {
     });
     results.push({ estudiante: item.estudiante, programas: programasConLiquidaciones });
   }
-  
+
   return res.json({ page, totalPages, totalResults: total, results });
 }
 
 // ----------------------------------------------------------------------
-// OBTENER ESTUDIANTE POR DOCUMENTO (sin cambios, pero con índice)
+// OBTENER ESTUDIANTE POR DOCUMENTO (índice, sin cambios)
 // ----------------------------------------------------------------------
 router.get("/:documento", authMiddleware, async (req, res) => {
   try {
@@ -226,7 +215,7 @@ router.get("/:documento", authMiddleware, async (req, res) => {
     }
     const est = estudianteRes.rows[0];
     const estudianteId = est.id;
-    
+
     const estudianteRespuesta = {
       id: est.id, documento: est.documento, nombre: est.nombre, usuario: est.usuario,
       correo: est.correo, telefono: est.telefono, foto: est.foto, sede: est.sede,
@@ -238,7 +227,7 @@ router.get("/:documento", authMiddleware, async (req, res) => {
       nombreInstitucion: est.nombre_institucion, fechaTerminacion: est.fecha_terminacion,
       snpIcfes: est.snp_icfes,
     };
-    
+
     const programasRes = await db.execute({
       sql: `
         SELECT p.id, p.nombre, ep.jornada, ep.categoria, ep.situacion
@@ -249,11 +238,11 @@ router.get("/:documento", authMiddleware, async (req, res) => {
       args: [estudianteId],
     });
     const programas = programasRes.rows;
-    
+
     if (programas.length === 0) {
       return res.json({ estudiante: estudianteRespuesta, programas: [] });
     }
-    
+
     const programaIds = programas.map(p => p.id);
     const liquidacionesDB = await db.execute({
       sql: `
@@ -264,18 +253,18 @@ router.get("/:documento", authMiddleware, async (req, res) => {
       `,
       args: [estudianteId, ...programaIds],
     });
-    
+
     const liquidacionesPorPrograma = new Map();
     for (const liq of liquidacionesDB.rows) {
       if (!liquidacionesPorPrograma.has(liq.programa_id)) liquidacionesPorPrograma.set(liq.programa_id, []);
       liquidacionesPorPrograma.get(liq.programa_id).push(liq);
     }
-    
+
     const resultProgramas = programas.map(prog => ({
       ...prog,
       liquidaciones: liquidacionesPorPrograma.get(prog.id) || [],
     }));
-    
+
     return res.json({ estudiante: estudianteRespuesta, programas: resultProgramas });
   } catch (error) {
     console.error(error);
