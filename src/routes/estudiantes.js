@@ -116,7 +116,7 @@ async function enviarResultados(res, estudianteIds, page, total, totalPages) {
         e.departamento_residencia, e.pais_residencia, e.nombre_institucion,
         e.fecha_terminacion, e.snp_icfes,
         p.id AS programa_id, p.nombre AS programa_nombre,
-        ep.estudiantePensum, ep.jornada, ep.categoria, ep.situacion
+        ep.jornada, ep.categoria, ep.situacion
       FROM estudiantes e
       LEFT JOIN estudiante_programa ep ON ep.estudiante_id = e.id
       LEFT JOIN programas p ON p.id = ep.programa_id
@@ -163,7 +163,6 @@ async function enviarResultados(res, estudianteIds, page, total, totalPages) {
       estudiantesMap.get(row.id).programas.push({
         id: row.programa_id,
         nombre: row.programa_nombre,
-        estudiantePensum: row.estudiantePensum,
         jornada: row.jornada,
         categoria: row.categoria,
         situacion: row.situacion,
@@ -242,7 +241,7 @@ router.get("/:documento", authMiddleware, async (req, res) => {
     
     const programasRes = await db.execute({
       sql: `
-        SELECT p.id, p.nombre, ep.estudiantePensum, ep.jornada, ep.categoria, ep.situacion
+        SELECT p.id, p.nombre, ep.jornada, ep.categoria, ep.situacion
         FROM estudiante_programa ep
         JOIN programas p ON p.id = ep.programa_id
         WHERE ep.estudiante_id = ?
