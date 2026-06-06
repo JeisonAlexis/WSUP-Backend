@@ -6,7 +6,7 @@ const router = express.Router();
 const ITEMS_PER_PAGE = 10;
 
 // ----------------------------------------------------------------------
-// BÚSQUEDA OPTIMIZADA (nombre, documento, programa - con manejo de mayúsculas)
+// BÚSQUEDA OPTIMIZADA (nombre, documento, programa - búsqueda flexible)
 // ----------------------------------------------------------------------
 router.get("/search", authMiddleware, async (req, res) => {
   try {
@@ -17,115 +17,74 @@ router.get("/search", authMiddleware, async (req, res) => {
       return res.status(400).json({ error: "Query requerida" });
     }
 
-    const palabras = normalizar(q)
-      .split(/\s+/)
-      .filter(Boolean);
+    const trimmed = q.trim();
 
-    // -------------------------------------------------
-    // Búsqueda rápida por documento exacto
-    // -------------------------------------------------
-    if (/^\d+$/.test(q.trim())) {
+    // ---------- Caso especial: solo dígitos (documento exacto) ----------
+    if (/^\d+$/.test(trimmed)) {
       const docRes = await db.execute({
-        sql: `
-          SELECT id
-          FROM estudiantes
-          WHERE documento = ?
-        `,
-        args: [q.trim()],
+        sql: `SELECT id FROM estudiantes WHERE documento = ?`,
+        args: [trimmed],
       });
-
-      const estudianteIds = docRes.rows.map(r => r.id);
-
+      const estudianteIds = docRes.rows.map(row => row.id);
       const total = estudianteIds.length;
       const totalPages = Math.ceil(total / ITEMS_PER_PAGE);
 
-      if (!estudianteIds.length) {
-        return res.json({
-          page,
-          totalPages,
-          totalResults: 0,
-          results: [],
-        });
+      if (estudianteIds.length === 0) {
+        return res.json({ page, totalPages, totalResults: total, results: [] });
       }
 
-      return await enviarResultados(
-        res,
-        estudianteIds,
-        page,
-        total,
-        totalPages
-      );
+      return await enviarResultados(res, estudianteIds, page, total, totalPages);
     }
 
-    // -------------------------------------------------
-    // Obtener estudiantes + programas
-    // -------------------------------------------------
-    const candidatos = await db.execute({
-      sql: `
-        SELECT
-          e.id,
-          e.nombre,
-          e.documento,
-          GROUP_CONCAT(p.nombre, ' ') AS programas
-        FROM estudiantes e
-        LEFT JOIN estudiante_programa ep
-          ON ep.estudiante_id = e.id
-        LEFT JOIN programas p
-          ON p.id = ep.programa_id
-        GROUP BY e.id
-      `,
+    // ---------- Búsqueda por palabras (cada palabra puede estar en nombre, documento o programa) ----------
+    const palabras = trimmed.split(/\s+/).filter(Boolean);
+
+    // Construimos una condición para cada palabra:
+    // ( nombre LIKE ? OR documento LIKE ? OR EXISTS (subconsulta programa) )
+    const condicionesPorPalabra = palabras.map(() => {
+      return `(
+        e.nombre LIKE ? OR 
+        e.documento LIKE ? OR 
+        EXISTS (
+          SELECT 1 
+          FROM estudiante_programa ep
+          JOIN programas p ON p.id = ep.programa_id
+          WHERE ep.estudiante_id = e.id AND p.nombre LIKE ?
+        )
+      )`;
+    }).join(" AND ");
+
+    // Argumentos: 3 por palabra (%palabra% para nombre, documento, programa)
+    const args = palabras.flatMap(p => [`%${p}%`, `%${p}%`, `%${p}%`]);
+
+    // Obtener IDs paginados
+    const idsQuery = `
+      SELECT e.id
+      FROM estudiantes e
+      WHERE ${condicionesPorPalabra}
+      ORDER BY e.id
+      LIMIT ? OFFSET ?
+    `;
+    const paginationArgs = [...args, ITEMS_PER_PAGE, (page - 1) * ITEMS_PER_PAGE];
+    const idsRes = await db.execute({ sql: idsQuery, args: paginationArgs });
+    const estudianteIds = idsRes.rows.map(row => row.id);
+
+    // Total de resultados (sin paginar)
+    const totalRes = await db.execute({
+      sql: `SELECT COUNT(*) as total FROM estudiantes e WHERE ${condicionesPorPalabra}`,
+      args: args,
     });
-
-    // -------------------------------------------------
-    // Filtrado inteligente con tildes
-    // -------------------------------------------------
-    const idsEncontrados = [];
-
-    for (const row of candidatos.rows) {
-      const textoBusqueda = normalizar(`
-        ${row.nombre || ""}
-        ${row.documento || ""}
-        ${row.programas || ""}
-      `);
-
-      const coincide = palabras.every(p =>
-        textoBusqueda.includes(p)
-      );
-
-      if (coincide) {
-        idsEncontrados.push(row.id);
-      }
-    }
-
-    const total = idsEncontrados.length;
+    const total = totalRes.rows[0].total;
     const totalPages = Math.ceil(total / ITEMS_PER_PAGE);
 
-    const inicio = (page - 1) * ITEMS_PER_PAGE;
-    const fin = inicio + ITEMS_PER_PAGE;
-
-    const idsPagina = idsEncontrados.slice(inicio, fin);
-
-    if (!idsPagina.length) {
-      return res.json({
-        page,
-        totalPages,
-        totalResults: total,
-        results: [],
-      });
+    if (estudianteIds.length === 0) {
+      return res.json({ page, totalPages, totalResults: total, results: [] });
     }
 
-    return await enviarResultados(
-      res,
-      idsPagina,
-      page,
-      total,
-      totalPages
-    );
+    return await enviarResultados(res, estudianteIds, page, total, totalPages);
   } catch (error) {
     console.error(error);
-    return res.status(500).json({
-      error: "Error interno del servidor",
-    });
+    return res.status(500).json({ error: "Error interno del servidor" });
   }
 });
 
@@ -242,7 +201,7 @@ async function enviarResultados(res, estudianteIds, page, total, totalPages) {
 }
 
 // ----------------------------------------------------------------------
-// OBTENER ESTUDIANTE POR DOCUMENTO (sin cambios, con índice)
+// OBTENER ESTUDIANTE POR DOCUMENTO (índice, sin cambios)
 // ----------------------------------------------------------------------
 router.get("/:documento", authMiddleware, async (req, res) => {
   try {
