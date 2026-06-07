@@ -43,19 +43,29 @@ router.get("/search", authMiddleware, async (req, res) => {
     // ( nombre LIKE ? OR documento LIKE ? OR EXISTS (subconsulta programa) )
     const condicionesPorPalabra = palabras.map(() => {
       return `(
-        e.nombre LIKE ? OR 
-        e.documento LIKE ? OR 
-        EXISTS (
-          SELECT 1 
-          FROM estudiante_programa ep
-          JOIN programas p ON p.id = ep.programa_id
-          WHERE ep.estudiante_id = e.id AND p.nombre LIKE ?
-        )
-      )`;
+    e.nombre LIKE ? OR
+    e.documento LIKE ? OR
+    e.sede LIKE ? OR
+    EXISTS (
+      SELECT 1
+      FROM estudiante_programa ep
+      JOIN programas p ON p.id = ep.programa_id
+      WHERE ep.estudiante_id = e.id
+        AND p.nombre LIKE ?
+    )
+  )`;
     }).join(" AND ");
 
-    // Argumentos: 3 por palabra (%palabra% para nombre, documento, programa)
-    const args = palabras.flatMap(p => [`%${p}%`, `%${p}%`, `%${p}%`]);
+    const args = palabras.flatMap(p => {
+      const term = `%${p}%`;
+
+      return [
+        term, // nombre
+        term, // documento
+        term, // sede
+        term  // programa
+      ];
+    });
 
     // Obtener IDs paginados
     const idsQuery = `
